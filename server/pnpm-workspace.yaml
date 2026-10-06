@@ -1,0 +1,8 @@
+# pnpm 12 的构建脚本许可：测试工具链与本地模型需要执行依赖自带的安装脚本
+allowBuilds:
+  '@parcel/watcher': true
+  '@swc/core': true
+  esbuild: true
+  onnxruntime-node: true
+  protobufjs: true
+  unrs-resolver: true

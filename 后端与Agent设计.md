@@ -10,31 +10,37 @@
 
 - 后端：NestJS + TypeScript，`@Sse()` 流式输出，`@nestjs/schedule` 定时任务，`@nestjs/jwt` 认证，class-validator 参数校验
 - 数据库：MySQL 8（业务数据）+ ChromaDB（RAG 知识库与跨会话记忆）
-- 数据访问：mysql2 驱动，modules 各模块的 repository 层执行参数化 SQL，挂号下单与号源占号用连接事务；表结构以 `server/sql/schema.sql` 为唯一来源
-- AI：`openai` npm SDK（对话与结构化输出，端点与模型可配）；embedding 使用 OpenAI 兼容接口（中文向量模型如 bge-m3），由后端计算向量后写入 Chroma；Chroma 客户端使用 `chromadb` npm 包
-- 结构化输出：zod 定义 schema，LLM 输出经 zod 解析校验
+- 数据访问：mysql2 驱动，业务模块的 repository 层执行参数化 SQL，挂号下单与号源占号用连接事务；连接池由 `src/database` 提供；表结构以 `server/sql/schema.sql` 为唯一来源
+- AI：`openai` npm SDK；embedding 使用 BAAI/bge-m3 本地加载（Transformers.js），模型下载目录由 `EMBEDDING_MODEL_DIR` 配置；Chroma 客户端使用 `chromadb` npm 包
+- LLM 调用：agent-core/llm 导出 `loadLlmConfig`、`createLlmClient`、`getLlmClient`、`getLlmModel`，请求组装、流式消费、结构化解析、工具循环全部手写；agent-core/embedding 导出 `EmbeddingService` 与 `getEmbeddingService` 单例，提供本地 bge-m3 向量计算
+- TypeScript 版本：server 用 6.x（Nest CLI 12 需要 TypeScript 的编程式编译器接口，7.0 只发布 `tsc` 可执行文件，该接口要等 7.1），frontend 用 7.x；两个项目各自安装依赖，版本互不影响
+- 模块形态：server 与 frontend 都设为 ESM（package.json 的 `type: module`），`tsconfig` 用 `nodenext`，产物里是 `import` 与 `export`；Nest 12 的 `@nestjs/common` 与 `@nestjs/core` 本身就是纯 ESM 包，原生导入即可；相对导入写 `.js` 后缀
+- TypeScript 配置：`server/tsconfig.json` 打开 `strict`、`noUncheckedIndexedAccess`、`exactOptionalPropertyTypes`、`noImplicitOverride`、`noImplicitReturns`、`isolatedModules`、`resolveJsonModule`，`include` 覆盖 src、test、scripts；`server/tsconfig.build.json` 设 `rootDir: ./src` 并排除 test、scripts、spec；类型检查命令为 `pnpm typecheck`；frontend 的 `tsconfig.json` 覆盖 `src` 与 `vite.config.ts`，`import.meta.env` 的类型由 `src/vite-env.d.ts` 提供
+- 测试：jest 30 加 @swc/jest 做转换，转译与类型检查分离（类型检查交给 `pnpm typecheck`）；jest 运行在 CommonJS 之下，所以 `.swcrc` 的 `module.type` 为 `commonjs`，jest 配置用 `moduleNameMapper` 把相对导入的 `.js` 后缀映射回 `.ts` 源文件；jest 的沙箱会复制 `process.env`，`.env` 由 `test/setup-env.ts` 用 Node 内置的 `parseEnv` 写入沙箱内的 `process.env`；pnpm 12 的构建脚本许可写在 `server/pnpm-workspace.yaml`；本地模型验证走 `pnpm check:embedding`，jest 的 VM 上下文与 onnxruntime-node 的原生浮点数组存在领域不匹配，无法在 jest 内运行
 
-工程边界：`medical-assistant/` 根目录只有 `server/` 与 `frontend/` 两个子目录和 README。server 与 frontend 是两个独立项目，各自拥有 package.json、tsconfig、.env、依赖安装，没有根 pnpm workspace，没有共享类型包。`docker-compose.yml`（MySQL 8 + ChromaDB）放在 server/ 内，属于后端基础设施。
+工程边界：`medical-assistant/` 根目录只有 `server/` 与 `frontend/` 两个子目录和 README。server 与 frontend 是两个独立项目，各自拥有 package.json、tsconfig、.env、依赖安装，没有根 pnpm workspace，没有共享类型包。MySQL 8 与 ChromaDB 部署在服务器 192.168.145.101，本地不启动数据库容器。
 
 ## 三、server 目录结构
 
 ```text
 server/
-  docker-compose.yml      # MySQL 8 + ChromaDB
   sql/
     schema.sql            # 建库建表 DDL，表结构唯一来源
     seed.sql              # 种子数据（实现阶段创建）
   scripts/
     eval.ts               # 评测运行入口
+    check-embedding.ts    # 本地向量模型真实检查，用 tsx 运行
   src/
     main.ts
     app.module.ts
+    database/             # mysql2 连接池，基础设施，全局注册
     modules/
       auth/               # AuthModule：注册、登录、JWT
       chat/               # ChatModule：SSE 对话入口、会话管理、档案与历史问诊、skills 重载
       registration/       # RegistrationModule：科室/医生/排班/评价、就诊人、手动挂号、支付、取消、退款、超时取消任务
-      database/          # DatabaseModule：mysql2 连接池
     agent-core/
+      llm/                # llm.client.ts：配置校验、客户端与模型名的直接导出
+      embedding/          # embedding.service.ts：EmbeddingService 与进程内单例，本地 bge-m3 向量计算
       runtime/            # agent runtime：orchestrator、state-machine、runner
       agents/             # base.agent.ts + triage / registration / general / escalation
       intent/             # 意图识别：LLM 结构化输出 + 规则兜底
@@ -51,12 +57,17 @@ server/
 
 ## 四、模块划分
 
+modules 只放业务模块：
+
 - `AuthModule`：注册、登录、签发与校验 JWT
 - `ChatModule`：SSE 对话入口、会话列表与消息查询、健康档案接口（读写 user_profile）、历史问诊接口（读 episodic）、skills 查看与重载；对话请求转交 agent-core 处理
 - `RegistrationModule`：医院/科室/医生/排班/评价查询、就诊人管理、手动挂号下单、支付、取消、退款、超时取消定时任务、号源并发控制；业务 service 供 agent-core 的工具调用
-- `DatabaseModule`：mysql2 连接池的创建与注入
+
+数据库连接池是基础设施，放 `src/database/`（mysql2 连接池的创建与注入），app.module 全局注册，各模块 repository 注入池执行 SQL。
 
 各模块内部按 service + repository 分层：repository 负责全部 SQL（参数化查询、连接事务），service 负责业务规则与事务边界。
+
+agent-core 是普通 TypeScript，不使用 Nest 的依赖注入：`llm` 导出 `loadLlmConfig`、`createLlmClient`、`getLlmClient`、`getLlmModel`，`embedding` 导出 `EmbeddingService` 与 `getEmbeddingService` 单例，agent 代码直接 import 使用；装配由 modules 层负责，构造 agent 时把需要的业务 service 传进构造函数。
 
 ## 五、Agent 设计
 
@@ -272,21 +283,24 @@ SSE 事件：
 
 ## 十、配置项（server/.env）
 
-- `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`：对话与结构化输出端点
-- `EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL`：向量计算端点（默认 bge-m3 类中文模型）
-- `DATABASE_URL`：MySQL 连接串
-- `CHROMA_URL`：Chroma 服务地址
+- `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`：对话模型端点
+- `LLM_TIMEOUT_MS`：单次对话请求超时毫秒数（默认 60000）
+- `EMBEDDING_MODEL`：本地加载的 embedding 模型（BAAI/bge-m3）
+- `EMBEDDING_MODEL_DIR`：模型下载目录
+- `EMBEDDING_BATCH_SIZE`：向量计算批大小（默认 8）
+- `DATABASE_URL`：MySQL 连接串（指向 192.168.145.101）
+- `CHROMA_URL`：Chroma 服务地址（http://192.168.145.101:8000）
 - `JWT_SECRET`：令牌密钥
 - `DEFAULT_HOSPITAL_ID`：默认医院
 - `APPOINTMENT_EXPIRE_MINUTES`：待支付订单超时分钟数（默认 15）
 
 ## 十一、实现顺序与验收
 
-1. Docker Compose（MySQL 8 + ChromaDB）、执行 `sql/schema.sql` 建表、`sql/seed.sql` 种子数据（默认医院、科室、症状映射、医生、两周排班、测试账号与就诊人）、医院文档写入 knowledge_base
+1. 确认 192.168.145.101 上的 MySQL 8 与 ChromaDB 可用、执行 `sql/schema.sql` 建表、`sql/seed.sql` 种子数据（默认医院、科室、症状映射、医生、两周排班、测试账号与就诊人）、医院文档写入 knowledge_base
 2. AuthModule 与 RegistrationModule 业务接口（手动挂号、支付、取消、超时任务）
 3. agent-core：意图识别、红旗规则引擎、四个 Agent、runtime、skills、RAG、三层记忆、工具
 4. ChatModule SSE 对接 agent-core
-5. 测试：单元测试（红旗规则引擎、状态机、意图解析、事实合并去重、摘要压缩、skills 匹配注入）+ e2e 全链路（问诊 → 推荐 → 自动挂号 → 支付 → 确认；手动挂号；红旗急诊；并发占号；取消退款；超时释放；跨会话记忆注入与情景检索；RAG 检索回答）+ eval 高危用例集回归
+5. 测试：单元测试（llm 配置校验、红旗规则引擎、状态机、意图解析、事实合并去重、摘要压缩、skills 匹配注入）+ e2e 全链路（问诊 → 推荐 → 自动挂号 → 支付 → 确认；手动挂号；红旗急诊；并发占号；取消退款；超时释放；跨会话记忆注入与情景检索；RAG 检索回答）+ eval 高危用例集回归
 
 ## 十二、待确认的假设
 
@@ -294,4 +308,4 @@ SSE 事件：
 - 账号下多个就诊人时，自动挂号前由 Agent 在对话中确认
 - 待支付订单超时 15 分钟自动取消并释放号源
 - 支付使用 mock 渠道，不接真实支付
-- embedding 使用 OpenAI 兼容端点，模型通过环境变量配置
+- embedding 使用 BAAI/bge-m3 本地加载（Transformers.js），fp32 权重以外置数据文件存放，下载目录由 `EMBEDDING_MODEL_DIR` 配置
