@@ -34,6 +34,7 @@ server/
     main.ts
     app.module.ts
     database/             # mysql2 连接池，基础设施，全局注册
+    utils/                # 通用函数：llm-extract.ts 从模型返回里取回答文本
     modules/
       auth/               # AuthModule：注册、登录、JWT
       chat/               # ChatModule：SSE 对话入口、会话管理、档案与历史问诊、skills 重载
